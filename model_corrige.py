@@ -13,9 +13,8 @@ Pipeline
 
 Evaluation caveat: the reference standard is hidden. On the holdout we measure
 against pseudo-labels drawn from the neutralised committee model, i.e. under
-an assumption on what merit is. The `ecart_conditionnel_r` metric does not
-depend on that assumption: it compares grant rates of the two groups at equal
-R score.
+an assumption on what merit is. The `ecart_conditionnel_merite` metric needs
+no labels: it compares grant rates of the two groups at equal merit score.
 
 Choice of merit: HxBuddy round 1 (accuracy on the evaluation set) ranked
 R + hours worked first (94.6%), ahead of R + hours + income (92.5%), R alone
@@ -43,6 +42,8 @@ from pathlib import Path
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from matplotlib.text import Text
+from matplotlib.transforms import Bbox
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
@@ -175,9 +176,9 @@ def etiquettes_equitables(modele, df, reglage, seed=0):
 # Metrics
 # ---------------------------------------------------------------------------
 
-def ecart_conditionnel_r(pred, groupe, cote_r, n_bins=8):
-    """Grant-rate gap between groups at equal R score, weighted by bin size."""
-    bins = pd.qcut(cote_r, n_bins, labels=False, duplicates='drop')
+def ecart_conditionnel_merite(pred, groupe, merite, n_bins=8):
+    """Grant-rate gap between groups at equal merit score, weighted by bin size."""
+    bins = pd.qcut(merite, n_bins, labels=False, duplicates='drop')
     ecarts, poids = [], []
     for b in np.unique(bins):
         m = bins == b
@@ -188,7 +189,7 @@ def ecart_conditionnel_r(pred, groupe, cote_r, n_bins=8):
     return float(np.average(ecarts, weights=poids))
 
 
-def mesurer(pred, y_ref, y_hist, groupe, cote_r):
+def mesurer(pred, y_ref, y_hist, groupe, merite):
     pred, y_ref, y_hist = map(np.asarray, (pred, y_ref, y_hist))
     out = {'taux_octroi': pred.mean()}
     for g in ('Center', 'Remote'):
@@ -197,7 +198,7 @@ def mesurer(pred, y_ref, y_hist, groupe, cote_r):
         out[f'tpr_{g}'] = pred[m & (y_ref == 1)].mean()
     out['ecart_parite'] = out['taux_Center'] - out['taux_Remote']
     out['ecart_eo'] = out['tpr_Center'] - out['tpr_Remote']
-    out['ecart_conditionnel_r'] = ecart_conditionnel_r(pred, groupe, np.asarray(cote_r))
+    out['ecart_conditionnel_merite'] = ecart_conditionnel_merite(pred, groupe, np.asarray(merite))
     out['accord_reference'] = (pred == y_ref).mean()
     out['accord_comite'] = (pred == y_hist).mean()
     return out
@@ -278,6 +279,56 @@ def front_pareto(x, y):
     ])
 
 
+def placer_etiquette_intelligente(ax, rendu, cadre, occupe, pt, x, y, texte, candidates_spec,
+                                  font_props=None, bbox_props=None):
+    """Place an annotation at the candidate offset with the lowest overlap cost."""
+    best_ann = None
+    best_bbox = None
+    best_cost = float('inf')
+
+    for idx, (d, sx, sy) in enumerate(candidates_spec):
+        ha = 'left' if sx > 0.1 else ('right' if sx < -0.1 else 'center')
+        va = 'bottom' if sy > 0.1 else ('top' if sy < -0.1 else 'center')
+        arrow = dict(arrowstyle='->', color='0.5', lw=0.6, shrinkA=2, shrinkB=3) if d > 10 else None
+
+        ann = ax.annotate(
+            texte, (x, y), textcoords='offset points', xytext=(sx * d, sy * d),
+            ha=ha, va=va, arrowprops=arrow, bbox=bbox_props, **(font_props or {})
+        )
+        ann.update_positions(rendu)
+        b = Text.get_window_extent(ann, rendu)
+
+        overlap_area = 0
+        for o in occupe:
+            if b.overlaps(o):
+                ix0 = max(b.x0, o.x0)
+                iy0 = max(b.y0, o.y0)
+                ix1 = min(b.x1, o.x1)
+                iy1 = min(b.y1, o.y1)
+                if ix1 > ix0 and iy1 > iy0:
+                    overlap_area += (ix1 - ix0) * (iy1 - iy0)
+
+        pad = 2
+        outside = (b.x0 < cadre.x0 + pad) or (b.x1 > cadre.x1 - pad) or \
+                  (b.y0 < cadre.y0 + pad) or (b.y1 > cadre.y1 - pad)
+
+        cost = (1e8 if outside else 0) + overlap_area * 100 + d * 1.5 + idx * 0.2
+
+        if cost < best_cost:
+            best_cost = cost
+            if best_ann is not None:
+                best_ann.remove()
+            best_ann = ann
+            best_bbox = b
+            if overlap_area == 0 and not outside:
+                break
+        else:
+            ann.remove()
+
+    occupe.append(best_bbox)
+    return best_ann
+
+
 def tracer(balayage, autres, lam_choisi, merite, chemin):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.5))
 
@@ -285,51 +336,116 @@ def tracer(balayage, autres, lam_choisi, merite, chemin):
     # remote regions. Pareto optimality is computed on its absolute value.
     tous = pd.concat([balayage, autres])
     front = tous[front_pareto(tous['ecart_eo'].abs(), tous['accord_reference'])]
-    ax1.scatter(front['ecart_eo'], front['accord_reference'], s=160, facecolors='none',
-                edgecolors='0.55', lw=1.5, zorder=1, label='Pareto optimal')
-    ax1.axvline(0, color='black', lw=0.8)
+    ax1.scatter(front['ecart_eo'], front['accord_reference'], s=170, facecolors='none',
+                edgecolors='0.5', lw=1.6, zorder=1, label='Pareto optimal')
+    ax1.axvline(0, color='black', lw=0.8, ls=':')
 
-    ax1.plot(balayage['ecart_eo'], balayage['accord_reference'], 'o-',
-             color='tab:blue', label='Neutralisation, sweep of λ')
-    for _, r in balayage.iterrows():
-        ax1.annotate(f"{r['lam']:g}", (r['ecart_eo'], r['accord_reference']),
-                     textcoords='offset points', xytext=(4, 4), fontsize=7, color='tab:blue')
+    xs, ys = balayage['ecart_eo'].to_numpy(), balayage['accord_reference'].to_numpy()
+    ax1.plot(xs, ys, 'o-', color='tab:blue', lw=1.8, markersize=5.5, label='Neutralisation, sweep of λ', zorder=2)
     choisi = balayage[np.isclose(balayage['lam'], lam_choisi)]
     if len(choisi):
         ax1.scatter(choisi['ecart_eo'], choisi['accord_reference'], s=260,
-                    facecolors='none', edgecolors='tab:red', lw=2, zorder=5,
+                    facecolors='none', edgecolors='tab:red', lw=2.2, zorder=5,
                     label=f'Chosen point (λ={lam_choisi:g})')
 
-    # Methods landing on the same point share one label.
-    for (x, y), bloc in autres.groupby(['ecart_eo', 'accord_reference'], sort=False):
-        noms = list(bloc.index)
-        nom = noms[0] if len(noms) == 1 else f"{noms[0]} (+{len(noms) - 1} identical)"
-        if 'RF' in nom:
-            m, c = 'X', 'black'
-        else:
-            m, c = ('s' if 'Exp' in nom else 'D' if 'Thresh' in nom else '^'), 'tab:orange'
-        ax1.scatter(x, y, marker=m, color=c, s=60, zorder=4)
-        ax1.annotate(nom, (x, y), textcoords='offset points', xytext=(5, -10), fontsize=7)
-    ax1.set_xlabel('Equal-opportunity gap vs pseudo-reference (TPR centres - TPR remote)')
-    ax1.set_ylabel('Agreement with pseudo-reference')
-    ax1.set_title(f'Fairness / utility trade-off (holdout, merit = {merite})')
-    ax1.grid(alpha=0.3)
-    ax1.legend(loc='lower left', fontsize=8)
+    # Comfortable margins to prevent clipping against axis edges
+    ax1.set_ylim(0.835, 0.875)
+    ax1.margins(x=0.08)
+    ax1.set_xlabel('Equal-opportunity gap vs pseudo-reference (TPR centres - TPR remote)', fontsize=9.5)
+    ax1.set_ylabel('Agreement with pseudo-reference', fontsize=9.5)
+    ax1.set_title(f'Fairness / utility trade-off (holdout, merit = {merite})', fontsize=11, fontweight='bold', pad=10)
+    ax1.grid(True, linestyle='--', alpha=0.4)
+    ax1.legend(loc='lower left', fontsize=8.5, framealpha=0.92, edgecolor='0.8')
 
-    ax2.plot(balayage['lam'], balayage['taux_Center'], 'o-', label='Grant rate, centres')
-    ax2.plot(balayage['lam'], balayage['taux_Remote'], 'o-', label='Grant rate, remote')
-    ax2.plot(balayage['lam'], balayage['ecart_conditionnel_r'], 's--',
-             label='Gap at equal R score')
+    ax2.plot(balayage['lam'], balayage['taux_Center'], 'o-', label='Grant rate, centres', lw=1.6)
+    ax2.plot(balayage['lam'], balayage['taux_Remote'], 'o-', label='Grant rate, remote', lw=1.6)
+    ax2.plot(balayage['lam'], balayage['ecart_conditionnel_merite'], 's--',
+             label='Gap at equal merit score', lw=1.6)
     ax2.plot(balayage['lam'], balayage['accord_comite'], '^:', color='0.4',
-             label='Agreement with historical committee')
+             label='Agreement with historical committee', lw=1.6)
     ax2.axhline(0, color='black', lw=0.8)
-    ax2.axvline(lam_choisi, color='tab:red', lw=1, ls='--')
-    ax2.set_xlabel('λ, share of the regional penalty removed')
-    ax2.set_title('Effect of λ')
-    ax2.grid(alpha=0.3)
-    ax2.legend(fontsize=8)
+    ax2.axvline(lam_choisi, color='tab:red', lw=1.2, ls='--')
+    ax2.set_xlabel('λ, share of the regional penalty removed', fontsize=9.5)
+    ax2.set_title('Effect of λ', fontsize=11, fontweight='bold', pad=10)
+    ax2.grid(True, linestyle='--', alpha=0.4)
+    ax2.legend(fontsize=8.5, framealpha=0.92, edgecolor='0.8')
 
     fig.tight_layout()
+    fig.canvas.draw()
+    rendu = fig.canvas.get_renderer()
+    cadre = ax1.get_window_extent(rendu)
+
+    # Collision obstacles: start with legend bounding box
+    occupe = [ax1.get_legend().get_window_extent(rendu)]
+    pt = fig.dpi / 72
+
+    # Markers as obstacles
+    for x, y in zip(xs, ys):
+        p = ax1.transData.transform((x, y))
+        occupe.append(Bbox.from_extents(p[0] - 5 * pt, p[1] - 5 * pt, p[0] + 5 * pt, p[1] + 5 * pt))
+
+    # 1. Label key points on the lambda sweep curve
+    selected_lams = {0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.5}
+    bbox_lam = dict(boxstyle='round,pad=0.15', facecolor='white', edgecolor='#b0c4de', lw=0.4, alpha=0.85)
+
+    for x, y, lam in zip(xs, ys, balayage['lam']):
+        if lam in selected_lams:
+            if np.isclose(lam, lam_choisi):
+                txt = f'λ={lam:g} (chosen)'
+                fprops = dict(fontsize=8, color='#b22222', weight='bold')
+                bprops = dict(boxstyle='round,pad=0.25', facecolor='#fff0f0', edgecolor='#b22222', lw=0.9, alpha=0.95)
+                cands = [(16, -0.6, 1.3), (20, 0, 1.4), (22, -1, 1)]
+            else:
+                txt = f'λ={lam:g}' if lam in (0.0, 1.5) else f'{lam:g}'
+                fprops = dict(fontsize=7, color='tab:blue')
+                bprops = bbox_lam
+                cands = [(d, sx, sy) for d in (7, 11, 16)
+                         for sx, sy in [(0, 1), (0.7, 0.9), (-0.7, 0.9), (1, 0.3), (-1, 0.3)]]
+            placer_etiquette_intelligente(ax1, rendu, cadre, occupe, pt, x, y, txt, cands,
+                                         font_props=fprops, bbox_props=bprops)
+
+    # 2. Comparison methods
+    for (x, y), bloc in autres.groupby(['ecart_eo', 'accord_reference'], sort=False):
+        noms = list(bloc.index)
+        if len(noms) == 1:
+            nom = noms[0]
+        else:
+            base = noms[0].rsplit(' ', 1)[0] if any(char.isdigit() for char in noms[0]) else noms[0]
+            nom = f"{base} (all bounds)"
+
+        if 'RF' in nom:
+            m, c = 'X', 'black'
+            cands = [(d, sx, sy) for d in (12, 16, 22) for sx, sy in [(0, 1.1), (-0.8, 1), (-1, 0.3), (0.8, 1)]]
+        else:
+            m, c = ('s' if 'Exp' in nom else 'D' if 'Thresh' in nom else '^'), 'tab:orange'
+            if y < 0.842:
+                # ExpGrad TPR at the bottom
+                cands = [(d, sx, sy) for d in (11, 16, 22) for sx, sy in [(0, -1), (-0.8, -1), (-1, -0.5), (0.8, -1)]]
+            elif x > 0.17 and y > 0.847:
+                # ThresholdOptimizer TPR vs ExpGrad DP 0.10: separate cleanly
+                if 'Thresh' in nom:
+                    cands = [(d, sx, sy) for d in (12, 18, 24) for sx, sy in [(-1, 0.8), (-1, 0.2), (-0.5, 1)]]
+                else:
+                    cands = [(d, sx, sy) for d in (12, 18, 24) for sx, sy in [(1, -0.6), (1, 0.2), (0.7, -1)]]
+            elif 'DP 0.05' in nom:
+                cands = [(d, sx, sy) for d in (10, 15, 20) for sx, sy in [(0.2, -1), (0.6, -1), (-0.3, -1), (1, -0.5)]]
+            elif 'DP 0.02' in nom:
+                cands = [(d, sx, sy) for d in (10, 15, 20) for sx, sy in [(-0.8, -1), (-1, -0.6), (0, -1)]]
+            elif 'ThresholdOptimizer DP' in nom:
+                cands = [(d, sx, sy) for d in (10, 14, 20) for sx, sy in [(-1, -0.5), (-1, 0.2), (-0.6, -1)]]
+            else:
+                # LR sans region
+                cands = [(d, sx, sy) for d in (11, 16, 22) for sx, sy in [(1, 0.2), (1, -0.6), (0.8, 1)]]
+
+        ax1.scatter(x, y, marker=m, color=c, s=70, zorder=4)
+        p = ax1.transData.transform((x, y))
+        occupe.append(Bbox.from_extents(p[0] - 5 * pt, p[1] - 5 * pt, p[0] + 5 * pt, p[1] + 5 * pt))
+
+        bbox_comp = dict(boxstyle='round,pad=0.22', facecolor='white', edgecolor='#a0a0a0', lw=0.5, alpha=0.92)
+        fprops = dict(fontsize=7.2, color='#222222')
+        placer_etiquette_intelligente(ax1, rendu, cadre, occupe, pt, x, y, nom, cands,
+                                     font_props=fprops, bbox_props=bbox_comp)
+
     fig.savefig(chemin, dpi=150)
     plt.close(fig)
 
@@ -380,13 +496,13 @@ def main():
 
     y_ref = etiquettes_equitables(modele, test, reglage)
     y_hist = test['decision_octroi'].to_numpy()
-    groupe, cote_r = groupe_region(test), test['cote_r_equivalent'].to_numpy()
+    groupe, merite = groupe_region(test), modele.score(test, lam=1.0, **reglage)
 
     # 2. Sweep of lambda.
     lignes = []
     for lam in LAMBDAS:
         pred = allouer(modele.score(test, lam=lam, **reglage), args.taux)
-        lignes.append({'lam': lam, **mesurer(pred, y_ref, y_hist, groupe, cote_r)})
+        lignes.append({'lam': lam, **mesurer(pred, y_ref, y_hist, groupe, merite)})
     balayage = pd.DataFrame(lignes)
 
     # 3. Comparison points.
@@ -395,11 +511,11 @@ def main():
         print('fairlearn comparison (ExponentiatedGradient takes a little while)...')
         autres.update(comparaison_fairlearn(train, test))
     autres = pd.DataFrame({
-        nom: mesurer(p, y_ref, y_hist, groupe, cote_r) for nom, p in autres.items()
+        nom: mesurer(p, y_ref, y_hist, groupe, merite) for nom, p in autres.items()
     }).T
 
     colonnes = ['taux_octroi', 'taux_Center', 'taux_Remote', 'ecart_parite', 'ecart_eo',
-                'ecart_conditionnel_r', 'accord_reference', 'accord_comite']
+                'ecart_conditionnel_merite', 'accord_reference', 'accord_comite']
     pd.set_option('display.width', 200)
     print('\nSweep of λ (holdout):')
     print(balayage.set_index('lam')[colonnes].round(3).to_string())
