@@ -5,3 +5,4 @@ __pycache__/
 *.pyc
 .DS_Store
 result_public.txt
+note.md
