@@ -1,0 +1,14 @@
+# Defi EquiAlgo - dependances / dependencies
+# Python 3.10+
+#   python3 -m venv venv && source venv/bin/activate
+#   pip install -r requirements.txt
+
+pandas>=2.0
+numpy>=1.24
+scikit-learn>=1.3
+fairlearn>=0.10
+matplotlib>=3.7
+jupyter>=1.0
+
+# Explicabilite / explainability - facultatif mais utile pour trouver les proxys
+shap>=0.44

@@ -1,0 +1,45 @@
+{
+  "challengeId": "13",
+  "files": [
+    {
+      "path": "LISEZMOI.md",
+      "bytes": 5229,
+      "sha256": "b8e230e0bc1603a6e11d410807adad1ecf28037fa064c67ee83ad3054006ac6a"
+    },
+    {
+      "path": "README.md",
+      "bytes": 4587,
+      "sha256": "90399da8c5ab4cc0a5b5dfe287c488019876bf382ae45e9ccc7b6aefca18221b"
+    },
+    {
+      "path": "baseline_model.ipynb",
+      "bytes": 13115,
+      "sha256": "fadbbc55cf2bd25a7f0559215c97f4aacd8b22a65e4018de5daa107639f8151a"
+    },
+    {
+      "path": "consignes-en.pdf",
+      "bytes": 137018,
+      "sha256": "9fcb6c880342de4972803816d115e271d52a75d188fee0b2309ea73fd33bf8a4"
+    },
+    {
+      "path": "consignes-fr.pdf",
+      "bytes": 137647,
+      "sha256": "1434617deda9caa27c390b0e48f48534606f4cb18fe6f345670184d6ad1dd017"
+    },
+    {
+      "path": "data/candidats_evaluation.csv",
+      "bytes": 241699,
+      "sha256": "5e6f1fdca94fea5417984fa035c05e1b579ea09b3427a4e0f005a769618eb4a7"
+    },
+    {
+      "path": "data/donnees_demandes.csv",
+      "bytes": 621899,
+      "sha256": "a3ce4e56b691daa163e3a455a88e76f85e3a1c8e201293fd3a87516b163c1f6d"
+    },
+    {
+      "path": "requirements.txt",
+      "bytes": 330,
+      "sha256": "ed6a4894fe0ac3ec31eeeb0fd9add957e6dfc1398a96f5db28a8b8f233b4f8f7"
+    }
+  ]
+}
