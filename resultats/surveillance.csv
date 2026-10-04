@@ -1,0 +1,9 @@
+check,value,status
+grant_rate,0.4,green
+parity_gap,0.00020716715489055293,green
+gap_equal_merit,0.004244482173174871,green
+region_rate_ratio,0.9216684772768424,green
+income_rate_ratio,0.9314673645086662,green
+intersection_rate_ratio,0.9348599515575232,green
+psi_r_score,0.009026749165317172,green
+psi_hours,0.011571696201241918,green

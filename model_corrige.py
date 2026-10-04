@@ -10,6 +10,8 @@ Pipeline
   3. Allocate the fixed budget by ranking: the top 40% are granted.
   4. Sweep `lam` on a holdout to draw the Pareto front, and compare with
      fairlearn's ThresholdOptimizer and ExponentiatedGradient.
+  5. Before writing predictions.csv, run the label-free monitoring dashboard
+     (`rapport_surveillance`) and hold the decisions if a check is red.
 
 Evaluation caveat: the reference standard is hidden. On the holdout we measure
 against pseudo-labels drawn from the neutralised committee model, i.e. under
@@ -34,6 +36,7 @@ Usage
   python model_corrige.py --poids-heures 0.10 --bonus-pg 0.5 --taux 0.42
   python model_corrige.py --exporter-variantes     # CSVs to probe on HxBuddy
   python model_corrige.py --sans-fairlearn         # skip the fairlearn comparison
+  python model_corrige.py --ignorer-alertes        # override the pre-release gate
 """
 import argparse
 import warnings
@@ -451,6 +454,147 @@ def tracer(balayage, autres, lam_choisi, merite, chemin):
 
 
 # ---------------------------------------------------------------------------
+# Governance: plain decision rule, explanations, production monitoring
+# ---------------------------------------------------------------------------
+
+# Columns the deployed decision may read. Everything else (region, postal code,
+# distance, income, program, first generation) stays out of the decision and is
+# kept only in an access-controlled store for monitoring.
+ENTREES_DECISION = ['cote_r_equivalent', 'heures_travail_semaine']
+
+# Alert levels for the pre-release dashboard: (green limit, amber limit).
+# 'max' checks must stay below the limits, 'min' checks above them. The gap
+# limits sit above the 99th percentile of an unbiased rule on a bootstrapped
+# cycle of 4,000 applicants (audit_rapport.ipynb, section 6.4). The ratio
+# checks use the US four-fifths benchmark for amber; small cells make them
+# noisy, so amber means "investigate", not "hold".
+SEUILS_ALERTE = {
+    'parity_gap': ('max', 0.05, 0.10),
+    'gap_equal_merit': ('max', 0.03, 0.06),
+    'region_rate_ratio': ('min', 0.80, 0.70),
+    'income_rate_ratio': ('min', 0.80, 0.70),
+    'intersection_rate_ratio': ('min', 0.80, 0.70),
+    'psi_r_score': ('max', 0.10, 0.25),
+    'psi_hours': ('max', 0.10, 0.25),
+    'override_gap': ('max', 0.05, 0.10),
+}
+
+
+def regle_decision(modele, df, taux=TAUX_CIBLE):
+    """The deployed rule in plain form: merit = R + w * hours, in R points.
+
+    Ranks exactly like `modele.score(df, lam=1.0)`, which is an increasing
+    linear function of the same quantity. Returns (w, threshold, merit, pred).
+    """
+    w = modele.coefs_['heures_travail_semaine'] / modele.coefs_['cote_r_equivalent']
+    merite = (df['cote_r_equivalent'] + w * df['heures_travail_semaine']).to_numpy()
+    pred = allouer(merite, taux)
+    return w, merite[pred == 1].min(), merite, pred
+
+
+def expliquer_decision(ligne, w, seuil, bande=0.25):
+    """Plain-language explanation owed on request under P-39.1 s. 12.1."""
+    merite = ligne['cote_r_equivalent'] + w * ligne['heures_travail_semaine']
+    ecart = merite - seuil
+    octroi = ecart >= 0
+    texte = [
+        f"Applicant {ligne['id_candidat']}: {'GRANTED' if octroi else 'REFUSED'}. "
+        'This decision was made by an automated process.',
+        f"Information used: R score {ligne['cote_r_equivalent']:.2f}, "
+        f"{ligne['heures_travail_semaine']:.1f} hours of paid work per week. "
+        'Region, postal code, distance, income, program and first-generation '
+        'status were not used.',
+        f'How it was decided: merit = R score + {w:.3f} x weekly hours = {merite:.2f}. '
+        f'This cycle the budget funds 40% of applicants, which sets the threshold at {seuil:.2f}.',
+    ]
+    if not octroi:
+        texte.append(f'Your merit is {-ecart:.2f} points below the threshold: about '
+                     f'{-ecart:.2f} more R points, or {-ecart / w:.1f} more weekly hours, '
+                     'would have changed the decision.')
+    if abs(ecart) <= bande:
+        texte.append('Your file is close to the threshold and was also reviewed by a staff member.')
+    texte.append('You may ask us to correct the information above, and submit observations '
+                 'to a staff member who can review the decision.')
+    return '\n'.join(texte)
+
+
+def intervalle_wilson(k, n, z=1.96):
+    """Wilson score interval for a proportion k / n."""
+    p = k / n
+    centre = (p + z**2 / (2 * n)) / (1 + z**2 / n)
+    demi = z * np.sqrt(p * (1 - p) / n + z**2 / (4 * n**2)) / (1 + z**2 / n)
+    return centre - demi, centre + demi
+
+
+def psi(reference, actuel, n_bins=10):
+    """Population stability index of `actuel` against `reference` (decile bins)."""
+    bords = np.unique(np.quantile(reference, np.linspace(0, 1, n_bins + 1)))
+    bords[0], bords[-1] = -np.inf, np.inf
+    ref = np.histogram(reference, bords)[0] / len(reference)
+    act = np.histogram(actuel, bords)[0] / len(actuel)
+    ref, act = np.clip(ref, 1e-4, None), np.clip(act, 1e-4, None)
+    return float(np.sum((act - ref) * np.log(act / ref)))
+
+
+def ratio_min_max(decision, cles, effectif_min=100):
+    """Lowest / highest grant rate over the cells of `cles` with enough applicants."""
+    taux = pd.Series(decision).groupby(cles).agg(['mean', 'size'])
+    taux = taux[taux['size'] >= effectif_min]['mean']
+    return float(taux.min() / taux.max())
+
+
+def rapport_surveillance(df, decision, merite, reference, decision_regle=None, revise=None):
+    """Pre-release fairness dashboard for one funding cycle. Needs no labels.
+
+    `df` holds the cycle's applicants with the monitoring columns, `decision`
+    the final decisions (after any human override), `merite` their merit
+    score, and `reference` the applications the rule was validated on, for
+    input drift. If the rule's own decisions and the mask of files sent to
+    human review are given, overrides are checked too.
+    """
+    decision, merite = np.asarray(decision), np.asarray(merite)
+    groupe = groupe_region(df)
+    g_ref = groupe_region(reference)
+    quintile = pd.qcut(df['revenu_familial_estime'], 5, labels=False).to_numpy()
+    tercile = pd.qcut(df['revenu_familial_estime'], 3, labels=False).to_numpy()
+    valeurs = {
+        'grant_rate': decision.mean(),
+        'parity_gap': abs(decision[groupe == 'Center'].mean() - decision[groupe == 'Remote'].mean()),
+        'gap_equal_merit': abs(ecart_conditionnel_merite(decision, groupe, merite)),
+        'region_rate_ratio': ratio_min_max(decision, df['region_administrative'].to_numpy()),
+        'income_rate_ratio': ratio_min_max(decision, quintile),
+        # Region group crossed with first generation, and with income tercile.
+        'intersection_rate_ratio': min(
+            ratio_min_max(decision, [groupe, df['premiere_generation_universitaire'].to_numpy()]),
+            ratio_min_max(decision, [groupe, tercile])),
+        # Drift is checked within each group: a shift in one group is what
+        # moves grant rates between groups.
+        'psi_r_score': max(psi(reference.loc[g_ref == g, 'cote_r_equivalent'],
+                               df.loc[groupe == g, 'cote_r_equivalent']) for g in ('Center', 'Remote')),
+        'psi_hours': max(psi(reference.loc[g_ref == g, 'heures_travail_semaine'],
+                             df.loc[groupe == g, 'heures_travail_semaine']) for g in ('Center', 'Remote')),
+    }
+    if decision_regle is not None:
+        # Net override rate (granted minus refused by a reviewer) among the
+        # reviewed files of each group. Human review can bring the bias back.
+        net = decision - np.asarray(decision_regle)
+        revise = np.asarray(revise)
+        valeurs['override_gap'] = abs(net[revise & (groupe == 'Center')].mean()
+                                      - net[revise & (groupe == 'Remote')].mean())
+
+    def statut(nom, v):
+        if nom == 'grant_rate':
+            return 'green' if 0.38 <= v <= 0.42 else 'amber' if BUDGET[0] <= v <= BUDGET[1] else 'red'
+        sens, vert, orange = SEUILS_ALERTE[nom]
+        if sens == 'max':
+            return 'green' if v <= vert else 'amber' if v <= orange else 'red'
+        return 'green' if v >= vert else 'amber' if v >= orange else 'red'
+
+    return pd.DataFrame([{'check': nom, 'value': v, 'status': statut(nom, v)}
+                         for nom, v in valeurs.items()]).set_index('check')
+
+
+# ---------------------------------------------------------------------------
 # Submission
 # ---------------------------------------------------------------------------
 
@@ -477,6 +621,8 @@ def main():
     ap.add_argument('--sans-fairlearn', action='store_true', help='skip the fairlearn comparison')
     ap.add_argument('--exporter-variantes', action='store_true',
                     help='also write the round-2 probes (SONDES) to resultats/hxbuddy/')
+    ap.add_argument('--ignorer-alertes', action='store_true',
+                    help='write predictions.csv even if a pre-release check is red')
     args = ap.parse_args()
     reglage = {'merite': args.merite, 'poids_heures': args.poids_heures, 'bonus_pg': args.bonus_pg}
 
@@ -529,6 +675,17 @@ def main():
     # 4. Final model on all historical data, then the candidates.
     final = ModeleComite().fit(demandes)
     pred = allouer(final.score(candidats, lam=args.lam, **reglage), args.taux)
+
+    # 5. Pre-release gate: the decisions are not written if a check is red.
+    merite_cand = final.score(candidats, lam=1.0, **reglage) / final.coefs_['cote_r_equivalent']
+    surveillance = rapport_surveillance(candidats, pred, merite_cand, demandes)
+    surveillance.to_csv(RESULTATS / 'surveillance.csv')
+    print('\nPre-release monitoring (candidates):')
+    print(surveillance.round(3).to_string())
+    rouges = list(surveillance.index[surveillance['status'] == 'red'])
+    if rouges and not args.ignorer_alertes:
+        raise SystemExit(f'Red checks {rouges}: decisions held. Rerun with --ignorer-alertes '
+                         'only after the validation committee signs off.')
     taux = ecrire_predictions(candidats, pred, RACINE / 'predictions.csv')
     g = groupe_region(candidats)
     print(f'\npredictions.csv: {reglage}, λ={args.lam:g}, grant rate {taux:.1%} '
