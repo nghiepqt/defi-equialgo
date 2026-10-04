@@ -1,122 +1,148 @@
 # ÉquiAlgo: fair student financing
 
-Engineering and Computer Science Hackathon 2026. 24-hour challenge.
+Engineering and Computer Science Hackathon 2026 (CodeML). Our submission for the
+ÉquiAlgo challenge: diagnose the bias in a scholarship and student-loan scoring
+model, correct it, and plan its monitoring in production.
 
-A Quebec financial institution scores scholarship and student-loan applications
-with a machine learning model. It is 88% accurate. An internal audit found it
-grants awards to 48.4% of applicants from Montréal and the Capitale-Nationale,
-against 27.3% from Bas-Saint-Laurent, Côte-Nord and
-Gaspésie–Îles-de-la-Madeleine.
+## In one paragraph
 
-Average R score is 27.3 in the remote regions and 28.0 in the centres. That
-accounts for part of the 21-point gap. The rest is unexplained.
+The production model is 88 % accurate because it copies a historical committee,
+and that committee is biased. At equal R score it penalises applicants from
+Bas-Saint-Laurent, Côte-Nord and Gaspésie–Îles-de-la-Madeleine by **1.4 R
+points**. It also favours wealthier households. We model the committee with an
+explicit region term so that the penalty can be measured and then removed. We
+rank applicants on what remains, and grant the top 40 %. The final decision is a
+one-line rule, validated against the hidden reference standard with 17 probe
+submissions:
 
-Your task: diagnose the bias, correct it, and propose a monitoring plan for
-production.
+> **Grant if R score + 0.145 × weekly hours worked ≥ 30.08**
 
-All data is synthetic. The institution is fictional.
+## Results
 
-## Setup
-
-```bash
-git clone <YOUR_REPO_URL>
-cd defi-equialgo
-python3 -m venv venv
-source venv/bin/activate          # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-jupyter notebook baseline_model.ipynb
-```
-
-Python 3.10 or newer. Run the notebook once before changing anything. It trains
-the production model, measures it, and audits it.
-
-## Files
-
-| File | Rows | Contents |
+| | Historical committee / production model | Our rule |
 |---|---|---|
-| `data/donnees_demandes.csv` | 10,000 | historical applications, with `decision_octroi` |
-| `data/candidats_evaluation.csv` | 4,000 | applications to score, no label |
-| `baseline_model.ipynb` | | production model, metrics, fairness audit |
+| Grant rate, centres / remote regions | 48.4 % / 27.3 % | **40.0 % / 40.0 %** |
+| Equal-opportunity gap | 0.270 (official baseline) | ≈ −0.02 (holdout estimate) |
+| Agreement with the reference standard (HxBuddy) | 88.7 % (committee score) | **94.6 %** |
+| Overall grant rate on the 4,000 candidates | | 40.0 % (budget 36–44 %) |
 
-### Columns
-
-| Column | Meaning |
-|---|---|
-| `id_candidat` | identifier, `C000000` format |
-| `cote_r_equivalent` | academic performance, R score equivalent, 15 to 40 |
-| `programme_etudes` | program of study, 5 categories |
-| `region_administrative` | sensitive attribute, Quebec administrative region |
-| `code_postal_3` | first three characters of the postal code |
-| `revenu_familial_estime` | gross annual household income |
-| `heures_travail_semaine` | hours worked per week during studies |
-| `distance_domicile_campus_km` | home to campus, km |
-| `premiere_generation_universitaire` | 1 if first in family to attend university |
-| `decision_octroi` | target, 1 granted, 0 refused |
-
-Region values carry no accents and no spaces around the hyphen: `Montreal`,
-`Capitale-Nationale`, `Bas-Saint-Laurent`, `Cote-Nord`,
-`Gaspesie-Iles-de-la-Madeleine`.
-
-## Constraints
-
-**Fixed budget.** Your grant rate on the 4,000 evaluation applicants must fall
-between 36% and 44%. Outside that range the technical section scores zero.
-
-**`decision_octroi` is not the target.** Judges score against a reference
-standard built independently of the historical committee. You do not have it.
-The column records what the committee did, and the committee is under audit.
-
-**Deleting `region_administrative` does not work.** Dropping it moves the parity
-gap from 0.188 to 0.181. Dropping the postal code as well moves it to 0.173.
-Distance, hours worked, household income and postal code all carry regional
-information. Section 5 of the notebook measures this.
+The equal-opportunity gap of our rule is estimated on a holdout set against
+pseudo-labels, because HxBuddy reports accuracy only. Section 7 of the audit
+notebook discusses this limit.
 
 ## Deliverables
 
-A GitHub repository, public or shared with the judges, containing:
+| Deliverable | File |
+|---|---|
+| Predictions | [`predictions.csv`](predictions.csv): 4,000 rows, `id_candidat,decision_octroi` |
+| Audit report | [`audit_rapport.ipynb`](audit_rapport.ipynb): bias measurement, proxy variables, choice of fairness metric, reconstruction of the reference standard, alternative models, ethics, governance and monitoring plan |
+| Corrected model | [`model_corrige.py`](model_corrige.py): mitigation, λ sweep, Pareto front, pre-release monitoring gate |
+| Pareto front | [`resultats/pareto_front.png`](resultats/pareto_front.png), also shown in section 4 of the audit notebook |
+| Pitch | `presentation.pdf` |
 
-- `predictions.csv` at the root. Two columns, 4,000 rows plus a header, values
-  0 or 1. The last notebook cell writes a valid example.
-- `audit_rapport.ipynb`. Measurement of the bias, your fairness metrics with
-  justification, and the proxy variables you found.
-- `model_corrige.py` or `.ipynb`. Your mitigation, with a Pareto front plot
-  across several settings of the fairness constraint.
-- `presentation.pdf`. Support for a five-minute pitch.
+## Method
 
-```csv
-id_candidat,decision_octroi
-C000042,1
-C000117,0
+1. **Model the committee.** A logistic regression on R score, log household
+   income, weekly hours worked and a remote-region indicator. The indicator
+   absorbs the regional penalty during training. Without it, the penalty leaks
+   into distance and hours worked, which predict the region with AUC 0.998 and
+   0.81.
+2. **Remove the bias at scoring time.** The remote term is set to zero (λ = 1)
+   and the income term is dropped. Merit is therefore R score + 0.145 × hours.
+3. **Allocate the fixed budget.** Rank on merit and grant the top 40 %.
+4. **Trade-off.** We sweep λ from 0 (the committee) to 1.5 (over-correction) to
+   draw the Pareto front, and compare with fairlearn's `ThresholdOptimizer` and
+   `ExponentiatedGradient`.
+5. **Pre-release gate.** A monitoring dashboard that needs no labels runs on the
+   decisions before `predictions.csv` is written. It holds the release if any
+   check is red.
+
+**Why such a simple model.** Section 4.1 of the audit tests the alternatives.
+Regularisation either changes nothing or shrinks the hours weight towards an
+"R only" rule that scores lower. A fairness penalty in the training loss reaches
+equal grant rates but keeps the income bias and invents a distance bonus. Tree
+models let the regional penalty leak into distance. Dropping the region indicator
+from training makes the hours weight collapse from 0.146 to 0.024
+(omitted-variable bias). Only the logistic model with an explicit region term
+separates bias from merit in a way that can be removed and explained.
+
+**Fairness metric: equal opportunity.** A deserving applicant should have the
+same chance wherever they live. Under the merit the reference uses, both groups
+have the same merit distribution, so demographic parity holds as well: the
+demographic-parity version of our rule changes none of the 4,000 decisions.
+Section 3.4 of the audit shows where the two metrics would diverge.
+
+## Main findings
+
+1. **Regional penalty.** 1.40 R points (95 % CI 1.27–1.54). In the R 28–30
+   band, the committee granted 71 % of centre applicants against 41 % of remote
+   applicants.
+2. **A second bias.** The committee favoured higher household incomes. The
+   reference standard gives income no weight in either direction.
+3. **Proxies.** `code_postal_3` maps one-to-one onto the region, and distance
+   recovers it with AUC 0.998. Dropping the region leaves the parity gap almost
+   unchanged (0.188 → 0.173).
+4. **The fairness trap.** Measured on the committee's own labels, the two groups
+   already have nearly equal true positive rates (0.849 vs 0.838). An
+   equal-opportunity constraint trained on those labels has nothing to correct.
+5. **Reconstructing the reference.** 17 probe submissions, each changing one
+   element of the rule, identify merit as R + hours. Income, distance, a
+   first-generation bonus, a remote bonus and quotas all score lower.
+6. **Past harm and governance.** The committee fails the four-fifths benchmark
+   on region and income, and our rule passes. About 560 remote applicants were
+   refused in the past although they clear the corrected threshold. Sections 5
+   and 6 set out the legal frame (Law 25, Quebec Charter, AMF guideline), the
+   roles, the right to human review, and the monitoring calendar.
+
+## Reproduce
+
+Python 3.10 or newer.
+
+```bash
+python3 -m venv venv
+source venv/bin/activate          # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+
+python model_corrige.py           # about 5 s: writes predictions.csv and resultats/
+jupyter notebook audit_rapport.ipynb
 ```
 
-## Scoring
+`python model_corrige.py` prints the committee model, the λ sweep, the fairlearn
+comparison and the monitoring checks. It then writes:
 
-| Section | Points | Judged by |
-|---|---|---|
-| Diagnostic rigour | 25 | jury |
-| Technical solution | 35 | automated scorer |
-| Governance and ethics | 25 | jury |
-| Pitch and code quality | 15 | jury |
+| File | Contents |
+|---|---|
+| `predictions.csv` | Final decisions on the 4,000 candidates |
+| `resultats/pareto_front.png` | Pareto front and effect of λ |
+| `resultats/pareto_lambda.csv` | Holdout metrics for each λ |
+| `resultats/comparaison.csv` | Holdout metrics for the production model and the fairlearn methods |
+| `resultats/surveillance.csv` | Pre-release monitoring checks on the candidates |
 
-The 35 automated points, both measured against the hidden reference standard:
+Other options:
 
-- Equity, 20 points. Share of the baseline equal-opportunity gap closed. The
-  baseline gap is 0.270.
-- Utility, 15 points. Agreement with the reference standard, scaled between a
-  random budget-respecting draw and a perfect allocation.
+```bash
+python model_corrige.py --sans-fairlearn         # skip the fairlearn comparison
+python model_corrige.py --merite r_seul --lam 1  # another merit hypothesis or λ
+python model_corrige.py --exporter-variantes     # write probe files to resultats/hxbuddy/
+python model_corrige.py --ignorer-alertes        # write predictions despite a red check
+```
 
-Both score zero if the budget constraint is broken.
+## Repository layout
 
-## Notes
+```
+├── README.md
+├── predictions.csv            submission
+├── audit_rapport.ipynb        audit, ethics, governance and monitoring
+├── model_corrige.py           corrected model
+├── baseline_model.ipynb       production model supplied by the organisers
+├── requirements.txt
+├── data/
+│   ├── donnees_demandes.csv       10,000 historical applications
+│   └── candidats_evaluation.csv   4,000 applications to score
+└── resultats/
+    ├── pareto_front.png, pareto_lambda.csv, comparaison.csv, surveillance.csv
+    └── hxbuddy/               the probe files submitted to HxBuddy
+```
 
-`fairlearn.postprocessing.ThresholdOptimizer` adjusts decision thresholds after
-training and runs in seconds. `fairlearn.reductions.ExponentiatedGradient`
-retrains under a constraint and takes minutes.
-
-Demographic parity and equal opportunity cannot both hold when the two groups
-have different profiles. Choose one and be ready to defend the choice.
-
-A single model is not a Pareto front. Sweep the fairness constraint and plot the
-results.
-
-Mentors are available throughout.
+All data are synthetic and the institution is fictional. The legal analysis in
+the audit notebook is ours, not a lawyer's.

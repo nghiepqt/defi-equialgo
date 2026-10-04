@@ -6,3 +6,5 @@ __pycache__/
 .DS_Store
 result_public.txt
 note.md
+*.pdf
+!presentation.pdf
